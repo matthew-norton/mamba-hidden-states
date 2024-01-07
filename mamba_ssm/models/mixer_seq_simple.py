@@ -150,7 +150,7 @@ class MixerModel(nn.Module):
             for i, layer in enumerate(self.layers)
         }
 
-    def forward(self, input_ids, output_hidden_states=False, inference_params=None):
+    def forward(self, input_ids, inference_params=None, output_hidden_states=False,):
         all_hidden_states = () if output_hidden_states else None
         
         hidden_states = self.embedding(input_ids)
@@ -245,7 +245,7 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         "position_ids" is just to be compatible with Transformer generation. We don't use it.
         num_last_tokens: if > 0, only return the logits for the last n tokens
         """
-        output = self.backbone(input_ids, inference_params=inference_params)
+        output = self.backbone(input_ids, inference_params=inference_params, output_hidden_states=output_hidden_states)
         hidden_states = output.last_hidden_state
 
         if num_last_tokens > 0:
