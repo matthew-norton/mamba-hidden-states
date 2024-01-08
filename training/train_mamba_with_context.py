@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 
 from transformers import AutoTokenizer, TrainingArguments
 from transformers import Trainer
+from datasets import load_dataset
 
 from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 
@@ -20,17 +21,11 @@ class SFTDataset(Dataset):
     def __init__(self, data_path, tokenizer):
         super(SFTDataset, self).__init__()
         data = []
-        print(f"Reading in data from file: {data_path}")
-        with open(data_path, "r") as file:
-            for line in file:  
-                try:
-                    data.append(json.loads(line))
-                except Exception as e:
-                    print("json processing exception", e)
-                    continue
+        dataset = load_dataset(data_path)['train']
+
 
         print(f"Got {len(data)} examples, preprocess...")
-        data_dict = self.preprocess(data, tokenizer)
+        data_dict = self.preprocess(dataset, tokenizer)
 
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]
@@ -41,25 +36,25 @@ class SFTDataset(Dataset):
     def __getitem__(self, i):
         return dict(input_ids=self.input_ids[i], labels=self.labels[i])
     
-    def preprocess(self, examples, tokenizer):
+    def preprocess(self, dataset, tokenizer):
         """
         Preprocess the data by tokenizing.
         """
         all_input_ids = []
 
         print("Tokenizing dataset...")
-        for ex in tqdm(examples):
+        for k,ex in enumerate(tqdm(dataset)):
             # Add a positive example
-            text = f"{ex['context']}\n\nQ: {ex['prompt']}\nA: {ex['response']}\n"
+            text = f"{ex['context']}\nQ: {ex['question']}\nA: {ex['answers']['text'][0]}"
             tokenized = tokenizer.encode(text)
             all_input_ids.append(torch.LongTensor(tokenized))
             
             # Generate a negative example
-            random_ex = random.choice(examples)
-            text = f"{random_ex['context']}\n\nQ: {ex['prompt']}\nA: I don't know.\n"
+            random_ex = random.choice(dataset)
+            text = f"{random_ex['context']}\nQ: {ex['question']}\nA: I don't know.\n"
             tokenized = tokenizer.encode(text)
             all_input_ids.append(torch.LongTensor(tokenized))
-
+        
         random.shuffle(all_input_ids)
 
         return dict(input_ids=all_input_ids, labels=all_input_ids)
@@ -171,7 +166,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--optim", type=str, default="adamw_torch")
-    parser.add_argument("--data_path", type=str, default="./data/10_flan.jsonl")
+    parser.add_argument("--data_path", type=str, default="squad")
     parser.add_argument("--num_epochs", type=int, default=10)
     args = parser.parse_args()
 
