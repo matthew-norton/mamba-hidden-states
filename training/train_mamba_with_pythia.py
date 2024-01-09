@@ -115,10 +115,16 @@ class MambaTrainer(Trainer):
         size = (1, pythia_output.hidden_states[0].shape[-1], mamba_output.hidden_states[0].shape[-1])
         W = torch.normal(0, std, size).to(torch.device('cuda:0'))
         teacher_loss = (
-            (pythia_lm_logits.softmax(dim=2)[:,:,:50280] - lm_logits.softmax(dim=2)).norm(dim=2).mean()
-            +
-            F.cosine_similarity(pythia_output.hidden_states[0] @ W,  mamba_output.hidden_states[0], dim=2).mean()
+            (pythia_lm_logits.softmax(dim=2)[:,:,:50280].to(torch.device('cuda:0')) - lm_logits.softmax(dim=2)).norm(dim=2).mean()
         )
+        teacher_loss = (teacher_loss +
+        -1.0*sum(
+            F.cosine_similarity(
+                p[0].to(torch.device('cuda:0')) @ W,  m[0], dim=2
+            ).mean()
+            for p, m in zip(pythia_output.hidden_states, mamba_output.hidden_states)
+        )
+                       )
         
         labels = input_ids.to(lm_logits.device)
         shift_logits = lm_logits[:, :-1, :].contiguous()
@@ -126,7 +132,7 @@ class MambaTrainer(Trainer):
 
         loss_fct = torch.nn.CrossEntropyLoss()
         lm_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), labels.view(-1))
-        return lm_loss + teacher_loss
+        return teacher_loss
 
     def save_model(self, output_dir, _internal_call=None):
         if not os.path.exists(output_dir):
