@@ -102,6 +102,8 @@ class MambaTrainer(Trainer):
           "EleutherAI/pythia-410m-deduped",
         ).to(torch.device('cuda:0'))
 
+        self.pythia.mamba_proj = None
+
     def compute_loss(self, model, inputs, return_outputs=False):
         input_ids = inputs.pop("input_ids")
         
@@ -110,10 +112,13 @@ class MambaTrainer(Trainer):
         pythia_lm_logits = pythia_output.logits
         lm_logits = mamba_output.logits
 
-        mu = 0
-        std = math.sqrt(1.0/mamba_output.hidden_states[0].shape[-1])
-        size = (1, pythia_output.hidden_states[0].shape[-1], mamba_output.hidden_states[0].shape[-1])
-        W = torch.normal(0, std, size).to(torch.device('cuda:0'))
+        if self.pythia.mamba_proj is None:
+            mu = 0
+            std = math.sqrt(1.0/mamba_output.hidden_states[0].shape[-1])
+            size = (1, pythia_output.hidden_states[0].shape[-1], mamba_output.hidden_states[0].shape[-1])
+            W = torch.normal(0, std, size).to(torch.device('cuda:0'))
+            self.pythia.mamba_proj = W
+            
         teacher_loss = (
             (pythia_lm_logits.softmax(dim=2)[:,:,:50280].to(torch.device('cuda:0')) - lm_logits.softmax(dim=2)).norm(dim=2).mean()
         )
