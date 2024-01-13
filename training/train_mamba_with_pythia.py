@@ -24,14 +24,14 @@ from datasets import load_dataset
 from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 
 class SFTDataset(Dataset):
-    def __init__(self, data_path, tokenizer):
+    def __init__(self, data_path, tokenizer, limit=None):
         super(SFTDataset, self).__init__()
         data = []
         dataset = load_dataset(data_path)['train']
 
 
         print(f"Got {len(data)} examples, preprocess...")
-        data_dict = self.preprocess(dataset, tokenizer)
+        data_dict = self.preprocess(dataset, tokenizer, limit)
 
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]
@@ -42,7 +42,7 @@ class SFTDataset(Dataset):
     def __getitem__(self, i):
         return dict(input_ids=self.input_ids[i], labels=self.labels[i])
     
-    def preprocess(self, dataset, tokenizer):
+    def preprocess(self, dataset, tokenizer, limit):
         """
         Preprocess the data by tokenizing.
         """
@@ -50,14 +50,11 @@ class SFTDataset(Dataset):
 
         print("Tokenizing dataset...")
         for k,ex in enumerate(tqdm(dataset)):
+            if limit is not None:
+                if k>=limit:
+                    break
             # Add a positive example
             text = f"{ex['context']}\nQ: {ex['question']}\nA: {ex['answers']['text'][0]}"
-            tokenized = tokenizer.encode(text)
-            all_input_ids.append(torch.LongTensor(tokenized))
-            
-            # Generate a negative example
-            random_ex = random.choice(dataset)
-            text = f"{random_ex['context']}\nQ: {ex['question']}\nA: I don't know.\n"
             tokenized = tokenizer.encode(text)
             all_input_ids.append(torch.LongTensor(tokenized))
         
@@ -87,9 +84,9 @@ class DataCollatorForSFTDataset(object):
     
 
 class SFTDataModule():
-    def __init__(self, tokenizer, data_path: str):
+    def __init__(self, tokenizer, data_path: str, limit):
 
-        self.dataset = SFTDataset(tokenizer=tokenizer, data_path=data_path)
+        self.dataset = SFTDataset(tokenizer=tokenizer, data_path=data_path, limit=limit)
         self.data_collator = DataCollatorForSFTDataset(tokenizer=tokenizer)
 
 class MambaTrainer(Trainer):
@@ -125,7 +122,7 @@ class MambaTrainer(Trainer):
         teacher_loss = (teacher_loss +
         -1.0*sum(
             F.cosine_similarity(
-                p[0].to(torch.device('cuda:0')) @ W,  m[0], dim=2
+                p[0].to(torch.device('cuda:0')) @ self.pythia.mamba_proj,  m[0], dim=2
             ).mean()
             for p, m in zip(pythia_output.hidden_states, mamba_output.hidden_states)
         )
@@ -137,7 +134,7 @@ class MambaTrainer(Trainer):
 
         loss_fct = torch.nn.CrossEntropyLoss()
         lm_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), labels.view(-1))
-        return teacher_loss
+        return  lm_loss + teacher_loss
 
     def save_model(self, output_dir, _internal_call=None):
         if not os.path.exists(output_dir):
