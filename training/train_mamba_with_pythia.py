@@ -138,7 +138,7 @@ class MambaTrainer(Trainer):
         lm_loss = loss_fct(
             shift_logits.view(-1, shift_logits.size(-1)), labels.view(-1)
         )
-        return embedding_loss + euclidean_loss + lm_loss
+        return euclidean_loss
 
     def save_model(self, output_dir, _internal_call=None):
         if not os.path.exists(output_dir):
