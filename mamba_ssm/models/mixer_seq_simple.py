@@ -146,30 +146,54 @@ class MixerModel(nn.Module):
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return {
-            i: layer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
+            i: layer.allocate_inference_cache(
+                batch_size, max_seqlen, dtype=dtype, **kwargs
+            )
             for i, layer in enumerate(self.layers)
         }
 
-    def forward(self, input_ids, inference_params=None, output_hidden_states=False,):
+    def forward(
+        self,
+        input_ids,
+        inference_params=None,
+        output_hidden_states=False,
+        backdoor_action=None,
+    ):
         all_hidden_states = () if output_hidden_states else None
-        
+
         hidden_states = self.embedding(input_ids)
         residual = None
-        
-        for layer in self.layers:
+
+        for k, layer in enumerate(self.layers):
             if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
+                if residual is None:
+                    all_hidden_states = all_hidden_states + (hidden_states,)
+                else:
+                    all_hidden_states = all_hidden_states + (hidden_states + residual,)
+
+            if backdoor_action is not None and k in backdoor_action.keys():
+                hidden_states = backdoor_action[k]
+                residual = None
+                hidden_states, residual = layer(
+                    hidden_states, residual, inference_params=inference_params
+                )
+
+            else:
+                hidden_states, residual = layer(
+                    hidden_states, residual, inference_params=inference_params
+                )
             
-            hidden_states, residual = layer(
-                hidden_states, residual, inference_params=inference_params
-            )
-            
+
         if not self.fused_add_norm:
-            residual = (hidden_states + residual) if residual is not None else hidden_states
+            residual = (
+                (hidden_states + residual) if residual is not None else hidden_states
+            )
             hidden_states = self.norm_f(residual.to(dtype=self.norm_f.weight.dtype))
         else:
             # Set prenorm=False here since we don't need the residual
-            fused_add_norm_fn = rms_norm_fn if isinstance(self.norm_f, RMSNorm) else layer_norm_fn
+            fused_add_norm_fn = (
+                rms_norm_fn if isinstance(self.norm_f, RMSNorm) else layer_norm_fn
+            )
             hidden_states = fused_add_norm_fn(
                 hidden_states,
                 self.norm_f.weight,
@@ -179,17 +203,16 @@ class MixerModel(nn.Module):
                 prenorm=False,
                 residual_in_fp32=self.residual_in_fp32,
             )
-        
+        # this grabs the post-norm final hidden state, which matches what phi-2 and pythia does
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
+
         return BaseModelOutputWithNoAttention(
-            last_hidden_state=hidden_states,
-            hidden_states = all_hidden_states
+            last_hidden_state=hidden_states, hidden_states=all_hidden_states
         )
 
 
 class MambaLMHeadModel(nn.Module, GenerationMixin):
-
     def __init__(
         self,
         config: MambaConfig,
@@ -210,7 +233,9 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
 
         super().__init__()
         if vocab_size % pad_vocab_size_multiple != 0:
-            vocab_size += pad_vocab_size_multiple - (vocab_size % pad_vocab_size_multiple)
+            vocab_size += pad_vocab_size_multiple - (
+                vocab_size % pad_vocab_size_multiple
+            )
         self.backbone = MixerModel(
             d_model=d_model,
             n_layer=n_layer,
@@ -238,30 +263,43 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         self.lm_head.weight = self.backbone.embedding.weight
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
-        return self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
+        return self.backbone.allocate_inference_cache(
+            batch_size, max_seqlen, dtype=dtype, **kwargs
+        )
 
-    def forward(self, input_ids, position_ids=None, inference_params=None, num_last_tokens=0, output_hidden_states=False):
+    def forward(
+        self,
+        input_ids,
+        position_ids=None,
+        inference_params=None,
+        num_last_tokens=0,
+        output_hidden_states=False,
+        backdoor_action=None
+    ):
         """
         "position_ids" is just to be compatible with Transformer generation. We don't use it.
         num_last_tokens: if > 0, only return the logits for the last n tokens
         """
-        output = self.backbone(input_ids, inference_params=inference_params, output_hidden_states=output_hidden_states)
+        output = self.backbone(
+            input_ids,
+            inference_params=inference_params,
+            output_hidden_states=output_hidden_states,
+        )
         hidden_states = output.last_hidden_state
 
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
         lm_logits = self.lm_head(hidden_states)
-        return CausalLMOutput(
-            logits=lm_logits,
-            hidden_states=output.hidden_states
-        )
+        return CausalLMOutput(logits=lm_logits, hidden_states=output.hidden_states)
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
         config_data = load_config_hf(pretrained_model_name)
         config = MambaConfig(**config_data)
         model = cls(config, device=device, dtype=dtype, **kwargs)
-        model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))
+        model.load_state_dict(
+            load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype)
+        )
         return model
 
     def save_pretrained(self, save_directory):
@@ -274,10 +312,10 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
             os.makedirs(save_directory)
 
         # Save the model's state_dict
-        model_path = os.path.join(save_directory, 'pytorch_model.bin')
+        model_path = os.path.join(save_directory, "pytorch_model.bin")
         torch.save(self.state_dict(), model_path)
 
         # Save the configuration of the model
-        config_path = os.path.join(save_directory, 'config.json')
-        with open(config_path, 'w') as f:
+        config_path = os.path.join(save_directory, "config.json")
+        with open(config_path, "w") as f:
             json.dump(self.config.__dict__, f)
